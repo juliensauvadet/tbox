@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+set -e
+
+appDir="$HOME/.t411"
+conf="$appDir/conf"
+
+usage ()
+{
+	echo "usage:"
+	echo "  login <user> <password>"
+	echo "  logout"
+	echo "  info"
+	echo "  deleteEmail <mailId>"
+	echo "  cleanInbox"
+	echo "  dl <torrentId | prezUrl> [toDir]"
+	echo "  dlm <inputFile> [toDir]"
+	echo "  up <dir>"
+}
+
+#
+# parametres par defaut de curl utilise dans le script.
+# ces parametres peuvent etre surcharges lors de chaque appel.
+#
+
+mycurl ()
+{
+	curl --insecure -sS# -A "$userAgent" -b "$cookies" -e "$baseUrl/" "$@"
+}
+
+fail ()
+{
+	message="$1"
+	logFile="$2"
+
+	[ -f "$logFile" ] && cat "$logFile"
+	[ -n "$message" ] && echo "FAIL $message" || echo "FAIL"
+	exit 1
+}
+
+login ()
+{
+	user="$1"
+	pass="$2"
+
+	rm -f "$conf" "$cookies"
+
+	echo "watchDir=" >>"$conf"
+	echo "cookies=$appDir/cookies" >>"$conf"
+	echo "userAgent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10.6; rv:9.0.1) Gecko/20100101 Firefox/9.0.1'" >>"$conf"
+	echo "baseUrl='http://www.t411.me'" >>"$conf"
+
+	. "$conf"
+
+	mycurl "$baseUrl/users/login/" \
+		-c "$cookies" \
+		-F "login=$user" \
+		-F "password=$pass" \
+		-F "remember=yes"
+
+	grep -E 'authKey\s*\w{32}' "$cookies" >/dev/null \
+		&& echo "OK" \
+		|| fail "something went wrong."
+}
+
+logout ()
+{
+	rm -f "$cookies"
+}
+
+#
+# affiche: ratio, upload, download, nombre d'email
+#
+
+info ()
+{
+	html=`mycurl "$baseUrl/"`
+
+	up=`echo "$html" | grep '&uarr;' | sed 's#.*>&uarr; \([^<]*\)<.*#\1#'`
+	dl=`echo "$html" | grep '&darr;' | sed 's#.*>&darr; \([^<]*\)<.*#\1#'`
+	ratio=`echo "$html" | grep 'class="rate"' | sed 's#.*class="rate">\([^<]*\)<.*#\1#'`
+	email=`echo "$html" | grep '<span><a href="/mailbox/"' | sed 's#.*<strong>\([0-9]\)*</strong>.*#\1#'`
+
+	echo -e "ratio: $ratio    up: $up    dl: $dl    mail: $email"
+}
+
+deleteEmail ()
+{
+	mailId="$1"
+
+	echo -n "delete email #$mailId "
+	mycurl "$baseUrl/mailbox/mail-delete/" -e "$baseUrl/mailbox/" \
+		-H "origin: $baseUrl" \
+		-H "x-requested-with: XMLHttpRequest" \
+		-H "accept-encoding: deflate" \
+		-H "accept-language: en-US,en;q=0.8,fr;q=0.6" \
+		-H "accept: application/json, text/javascript, */*; q=0.01" \
+		-d "ids[]=$mailId"
+	echo ""
+}
+
+#
+# supprime de la premiere page de la boite de reception les messages: telechargement complete ...
+#
+
+cleanInbox ()
+{
+	mycurl "$baseUrl/mailbox/" \
+		| grep '>T&eacute;l&eacute;chargement compl&eacute;t&eacute;! Quel est votre vote?<' \
+		| sed 's#.*"/mailbox/mail/?id=\([0-9]*\)".*#\1#' \
+		| while read mailId; do deleteEmail "$mailId"; done
+}
+
+#
+# telecharge un torrent
+# params: <torrentId|prezUrl> [toDir]
+# le torrent sera telecharge soit dans:
+#   - toDir s'il est specifie
+#   - watchDir s'il est specifie dans le fichier de conf
+#   - le repertoire courant
+#
+
+dl ()
+{
+	echo "$1" | grep -E '^[0-9]+$' >/dev/null \
+		&& torrentId="$1" \
+		|| torrentId=`mycurl -L "$1" | grep 'id="torrent-id"' | sed 's|.*value="\([0-9]*\)".*|\1|'`
+
+	[ -z "$torrentId" ] \
+		&& fail "unfound torrent id: $1"
+
+	[ -n "$2" ] \
+		&& folder="$2" \
+		|| { [ -n "$watchDir" ] && folder="$watchDir" || folder="."; }
+
+	refererUrl="$baseUrl/t/$torrentId"
+	torrentUrl="$baseUrl/torrents/download/?id=$torrentId"
+	torrentFile="$folder/t411-$torrentId.torrent"
+
+	echo "download $torrentUrl  ==>  $torrentFile"
+	mkdir -p "$folder"
+	mycurl -e "$refereUrl" "$torrentUrl" -o "$torrentFile"
+}
+
+dlm ()
+{
+	inputFile="$1"
+	toDir="$2"
+
+	while read torrent; do dl "$torrent" "$toDir"; done <"$inputFile"
+}
+
+#
+# upload/edit un torrent
+# categories supportees: video/* ebook/presse
+# params: repertoire
+# le repertoire doit contenir 4 fichiers nommes: torrent nfo prez upload
+# la prez doit etre encodee en windows-1252.
+# le fichier upload contient les valeurs du formulaire d'upload.
+# lors d'un upload reussi le torrent sera telecharge dans le repertoire et dans watchDir s'il est specifie dans la conf.
+#
+
+up ()
+{
+	dir="$1"
+
+	upload="$dir/upload"
+	torrent="$dir/torrent"
+	nfo="$dir/nfo"
+	prez="$dir/prez"
+	torrentId=""
+
+	for f in upload torrent nfo prez
+	do
+		[ ! -f "${!f}" ] && { echo "$f not found: ${!f}"; exit 1; }
+	done
+
+	. "$upload"
+	[ -z "$torrentId" ] && isNew='y' || isNew=''
+	tmp="$appDir/tmp/upload/`date '+%F %T'` $nom"
+	mkdir -p "$tmp"
+
+	## urls
+	if [ $isNew ]
+	then
+		url="$baseUrl/torrents/upload-step-2/"
+		refererUrl="$url?category=$categorie&submit=Suivant"
+	else
+		url="$baseUrl/torrents/edit/?id=$torrentId"
+		refererUrl="$url"
+	fi
+
+	## Build curl command
+	c="$categorie"
+	### everybody
+	[ 'true' ] &&
+	{
+		echo "mycurl \"$url\" -o \"$tmp/out\" -v \\" >"$tmp/cmd"
+		echo "    -F \"category=$categorie\" \\" >>"$tmp/cmd"
+		echo "    -F \"name=$nom\" \\" >>"$tmp/cmd"
+		echo "    -F \"nfo=@$nfo;filename=$nom.nfo\" \\" >>"$tmp/cmd"
+		echo "    -F \"descr=<$prez\" \\" >>"$tmp/cmd"
+	}
+	if [ $isNew ]
+	then
+		echo "    -F \"submit=Upload\" \\" >>"$tmp/cmd"
+		echo "    -F \"torrent=@$torrent;filename=$nom.torrent\" \\" >>"$tmp/cmd"
+	else
+		echo "    -F \"torrentId=$torrentId\" \\" >>"$tmp/cmd"
+	fi
+	### video
+	[[ $c_v == *$c* || $c_vg == *$c* || $c_vge == *$c* ]] &&
+	{
+		echo "    -F \"term[8][]=$video_format\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[17][]=$video_langue\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[7][]=$video_qualite\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[34][]=$video_systeme\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[9][]=$video_type\" \\" >>"$tmp/cmd"
+	}
+	[[ $c_vg == *$c* || $c_vge == *$c* ]] &&
+	{
+		for genre in $video_genre
+		do
+			echo "    -F \"term[2][]=$genre\" \\" >>"$tmp/cmd"
+		done
+	}
+	[[ $c_vge == *$c* ]] &&
+	{
+		echo "    -F \"term[46][]=$video_episode\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[45][]=$video_saison\" \\" >>"$tmp/cmd"
+	}
+	### presse
+	[[ $c_presse == *$c* ]] &&
+	{
+		echo "    -F \"term[47][]=$presse_format\" \\" >>"$tmp/cmd"
+		echo "    -F \"term[43][]=$presse_langue\" \\" >>"$tmp/cmd"
+		for genre in $presse_genre
+		do
+			echo "    -F \"term[12][]=$presse_genre\" \\" >>"$tmp/cmd"
+		done
+	}
+	### everybody
+	[ 'true' ] &&
+	{
+		echo "    -e \"$refererUrl\" \\" >>"$tmp/cmd"
+		echo "    &>\"$tmp/log\"" >>"$tmp/cmd"
+	}
+
+	## upload
+	echo "upload log in: $tmp/"
+	(. "$tmp/cmd") || fail "curl failed" "$tmp/log"
+
+	## check
+	if [ $isNew ]
+	then
+ 		torrentId=`grep 'href="/torrents/download/?id=' "$tmp/out" | sed 's|.*href="/torrents/download/?id=\([0-9]*\)".*|\1|'`
+ 		[ -n "$torrentId" ] \
+ 			&& echo "upload OK" \
+ 			|| fail "unfound torrentId, something went wrong."
+ 		echo "torrent id: $torrentId"
+ 		echo "torrent url: $baseUrl/torrents/download/?id=$torrentId"
+ 		echo -e "\ntorrentId=$torrentId" >>"$upload"
+	 	dl "$torrentId" "$dir"
+	 	[ -n "$watchDir" ] && dl "$torrentId" "$watchDir"
+	 else
+		grep 'Set-Cookie: error=Torrent+actualis%26%23233%3B;' "$tmp/log" >/dev/null \
+			&& echo "upload OK" \
+			|| fail "something went wrong."
+	 fi
+	 echo "$baseUrl/t/$torrentId"
+}
+
+main ()
+{
+	mkdir -p "$appDir"
+
+	[[ "$1" != "login" && ! -f "$conf" ]] &&
+	{
+		echo "conf missing, login first."
+		exit 1
+	}
+	. "$conf"
+	[[ "$1" != "login" && ! -f "$cookies" ]] &&
+	{
+		echo "cookies missing, login first."
+		exit 1
+	}
+
+	case "$1"
+	in
+		'login') login "$2" "$3";;
+		'logout') logout;;
+		'info') info;;
+		'deleteEmail') deleteEmail "$2";;
+		'cleanInbox') cleanInbox;;
+		'dl') dl "$2" "$3";;
+		'dlm') dlm "$2" "$3";;
+		'up') up "$2";;
+		*)
+			usage
+			exit 1
+	esac
+}
+
+# identifiant des categories
+c_v='633 636 402'
+c_vg='455 634 631 635'
+c_vge='637 639 433'
+c_presse='410'
+
+main "$@"
