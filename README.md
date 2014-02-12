@@ -9,11 +9,9 @@ le fichier de configuration `~/.t411/cookies` sera egalement cree.
 Dans le fichier de configurartion `watchDir` permet de definir le repertoire de telechargement des torrents.
 
 Categories supportees pour l'upload: `video/*` `ebook/presse`<br>
-Actuellement uniquement teste pour la categorie: `video/emissionTV`
+Actuellement uniquement teste pour la categorie `video/emissionTV`
 
 Dependances: `bash` `curl`
-
-Note: teste sur OS X
 
 ## Usage
 
@@ -60,7 +58,7 @@ Lors d'un upload reussi le torrent sera telecharge dans le repertoire passe en p
 Le repertoire passe en parametre doit contenir 4 fichiers nommes: `torrent` `nfo` `prez` `upload`<br>
 La prez doit etre encodee en `windows-1252`<br>
 Le fichier `upload` contient les valeurs du formulaire d'upload.<br>
-La meme commande permet d'editer un torrent, l'identifiant de celui-ci etant sauve dans le fichier `upload` apres le premier upload. Lors d'une edition le torrent n'est pas retelecharge<br>
+La meme commande permet d'editer un torrent, l'identifiant de celui-ci est sauve dans le fichier `upload`. Lors d'une edition le torrent n'est pas retelecharge.
 
 **Exemple de fichier `upload` pour une video**
 ```
