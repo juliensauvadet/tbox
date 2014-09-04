@@ -235,7 +235,7 @@ up ()
 		echo "    -F \"term[43][]=$presse_langue\" \\" >>"$tmp/cmd"
 		for genre in $presse_genre
 		do
-			echo "    -F \"term[12][]=$presse_genre\" \\" >>"$tmp/cmd"
+			echo "    -F \"term[12][]=$genre\" \\" >>"$tmp/cmd"
 		done
 	}
 	### everybody
